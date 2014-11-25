@@ -32,6 +32,9 @@ A company website; markdown is so easy the execs could do it.
 1. RSS/atom
 2. Caching
 
+### Odd things
+It uses extended attributes for the keyword tags, so this will only work on file systems that support them.
+
 ### License
 
 This project is licensed under the GPLv3. 
