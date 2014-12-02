@@ -1,0 +1,43 @@
+{
+	"webRoot": "www",
+	"domain": "http://localhost:8080",
+	"author": {
+		"name": "Morgan Hill",
+		"email": "morgan@pcwizzltd.com"
+	},
+	"internalRedirects": [
+		{
+			"begin": "index",
+			"end": ""
+		}
+	],
+	"externalRedirects": [],
+	"statics": [
+		{
+			"pathInternal": "css/",
+			"pathExternal": "css/"
+		},
+		{
+			"pathInternal": "img/",
+			"pathExternal": "img/"
+		},
+		{
+			"pathInternal": "js/",
+			"pathExternal": "js/"
+		}
+	],
+	"feeds": [
+		{
+			"title": "Markdown server",
+			"root": "",
+			"path": "feed",
+			"excludes": [
+				"css",
+				"img",
+				"js"
+			],
+			"description": "Not a real feed; unless it is.",
+			"author": {}
+		}
+	]
+}

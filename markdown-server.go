@@ -30,31 +30,119 @@ import (
 	"github.com/gorilla/feeds"
 	"time"
 	"os"
+	"encoding/json"
+	"net/http/httputil"
+	"net/url"
 )
 
 func main (){
+	loadConfig();
 	http.HandleFunc("/", markdownServer)
-	http.HandleFunc("/feed", feedServer)
-	http.Handle("/css/", http.FileServer(http.Dir(".www/css/")))
-	http.Handle("/js/", http.FileServer(http.Dir(".www/js/")))
-	http.Handle("/img/", http.FileServer(http.Dir(".www/img/")))
+	//Set feed handlers
+	for _, feed := range config.Feeds {
+		http.HandleFunc("/" + feed.Path, feed.feedServer)
+	}
+	//Statics
+	for _, static := range config.Statics { 
+		http.Handle("/" + static.PathExternal, http.FileServer(http.Dir("." + 
+			config.WebRoot + "/" + static.PathInternal)))
+	}
+	//Internal redirects
+	for _, internalRedirect := range config.InternalRedirects {
+		if internalRedirect.Silent {
+			url, err := url.Parse(config.Domain + "/" + internalRedirect.End)
+			if err != nil {
+				fmt.Print(err)
+			}
+			rp := httputil.NewSingleHostReverseProxy(url)
+			http.HandleFunc("/" + internalRedirect.Begin, reverseProxyHandler(rp))
+		} else {
+			http.Handle("/" + internalRedirect.Begin,
+				 http.RedirectHandler(internalRedirect.End, 302))
+		} 
+	}
+	//External redirects
+	for _, externalRedirect := range config.ExternalRedirects {
+		if externalRedirect.Silent {
+			url, err := url.Parse(externalRedirect.End)
+			if err != nil {
+				fmt.Print(err)
+			}
+			rp := httputil.NewSingleHostReverseProxy(url)
+			http.HandleFunc("/" + externalRedirect.Begin, reverseProxyHandler(rp))
+		} else {
+			http.Handle("/" + externalRedirect.Begin,
+				 http.RedirectHandler(externalRedirect.End, 301))
+		} 
+	}
 	http.ListenAndServe(":8080", nil)
 }
 
+//Begin type definitions
 type Page struct {
 	Title string
 	Content template.HTML 
 	Tags string
 }
 
+
+//Configuration
+var config Config
+type Redirect struct {
+	Begin string
+	End string
+	Silent bool
+}
+
+type Author struct {
+	Name string
+	Email string
+}
+
+type Feed struct {
+	Title string
+	Root string
+	Path string
+	Excludes []string
+	Description string
+	Author Author
+}
+
+type Config struct {
+	WebRoot string
+	Domain string
+	Author Author
+	InternalRedirects []Redirect
+	ExternalRedirects []Redirect
+	Statics []struct {
+		PathInternal string
+		PathExternal string
+	}
+	Feeds []Feed
+}
+//End type definitions
+
+//Begin functions
+
+//Reverse proxy
+func reverseProxyHandler(rp *httputil.ReverseProxy) func (w http.ResponseWriter, r *http.Request) {
+	return func (w http.ResponseWriter, r *http.Request){
+			rp.ServeHTTP(w, r)
+		}
+}
+//Load configuration from file
+func loadConfig (){
+	File, err := ioutil.ReadFile("config.json")
+	if err != nil {
+		fmt.Println(err)
+		return 
+	}
+	json.Unmarshal(File, &config)
+}
+
 func markdownServer(w http.ResponseWriter, r *http.Request){
 	path := r.URL.Path[1:]
-	//Place to do special routes
-	switch path{
-		case "":
-			path = "index"
-	}
-	file, err := ioutil.ReadFile("www/" + path + ".md")
+	file, err := ioutil.ReadFile(config.WebRoot + "/" + path + ".md")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -66,13 +154,13 @@ func markdownServer(w http.ResponseWriter, r *http.Request){
 		return
 	}
 	//Read tags from extended attribute
-	tags, err := xattr.Getxattr("www/" + path + ".md", "tags")
+	tags, err := xattr.Getxattr(config.WebRoot + "/" + path + ".md", "tags")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	//Read title from extended attribute
-	title, err := xattr.Getxattr("www/" + path + ".md", "title")
+	title, err := xattr.Getxattr(config.WebRoot + "/" + path + ".md", "title")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -81,20 +169,21 @@ func markdownServer(w http.ResponseWriter, r *http.Request){
 	t.Execute(w,page)
 }
 
-func feedServer (w http.ResponseWriter, r *http.Request){
-	Domain := "http://localhost:8080"
-	WebRoot := "www"
-	FeedAuthorName := "Morgan Hill"
-	FeedAuthorEmail := "morgan@pcwizzltd.com"
-	//Will grab this information from a config file at some point.
+func (feedConf Feed) feedServer (w http.ResponseWriter, r *http.Request){
+	var author Author
+	if feedConf.Author != author {
+		author = feedConf.Author
+	} else {
+		author = config.Author
+	}
 	feed := &feeds.Feed{
-		Title:		"Markdown server",
-		Link: 		&feeds.Link{Href: Domain},
-		Description:"Not a real feed; unless it is real",
-		Author:		&feeds.Author{FeedAuthorName, FeedAuthorEmail},
+		Title:		feedConf.Title,
+		Link: 		&feeds.Link{Href: config.Domain},
+		Description:feedConf.Description,
+		Author:		&feeds.Author{author.Name, author.Email},
 		Created:	time.Now(),
 	}
-	entries, err := exploreDirectory("www", []string {"www/css", "www/js", "www/img"})
+	entries, err := exploreDirectory(config.WebRoot + feedConf.Root, feedConf.Excludes)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -122,7 +211,7 @@ func feedServer (w http.ResponseWriter, r *http.Request){
 			return
 		}
 		if AuthorRaw == nil {
-			Author = FeedAuthorName
+			Author = author.Name
 		} else {
 			Author = string(AuthorRaw)
 		}
@@ -141,14 +230,14 @@ func feedServer (w http.ResponseWriter, r *http.Request){
 			return
 		}
 		if EmailRaw == nil {
-			Email = FeedAuthorEmail
+			Email = author.Email
 		} else {
 			Email = string(EmailRaw)
 		}
 		//Link
-		Link := strings.TrimPrefix(entry, WebRoot + "/")
+		Link := strings.TrimPrefix(entry, config.WebRoot + "/")
 		Link = strings.TrimSuffix(Link, ".md")
-		Link = Domain + "/" + Link
+		Link = config.Domain + "/" + Link
 		//Add object
 		Items = append(Items, &feeds.Item{
 			Title: Title,
@@ -200,3 +289,4 @@ func exploreDirectory (path string, excludes []string) ([]string, error){
 	}
 	return output, nil
 }
+//End functions
