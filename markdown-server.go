@@ -33,10 +33,74 @@ import (
 	"encoding/json"
 	"net/http/httputil"
 	"net/url"
+	"log"
 )
 
+type templateCacheObj struct{
+	Expiry int64
+	Obj *template.Template
+}
+
+type pageCacheObj struct{
+	Expiry int64
+	Obj Page
+}
+
+var templateCache map[string]templateCacheObj
+var pageCache map[string]pageCacheObj
+
+//Configuration
+var config Config
+type Redirect struct {
+	Begin string
+	End string
+	Silent bool
+}
+
+type Author struct {
+	Name string
+	Email string
+}
+
+type Feed struct {
+	Title string
+	Root string
+	Path string
+	Excludes []string
+	Description string
+	Author Author
+}
+
+type Config struct {
+	WebRoot string
+	Domain string
+	Author Author
+	InternalRedirects []Redirect
+	ExternalRedirects []Redirect
+	Statics []struct {
+		PathInternal string
+		PathExternal string
+	}
+	Feeds []Feed
+	ContentExpiry int64// Time period in seconds; controls cache.
+}
+
+//Load configuration from file
+func loadConfig (){
+	File, err := ioutil.ReadFile("config.json")
+	if err != nil {
+		log.Panic(err)
+	}
+	err = json.Unmarshal(File, &config)
+	if err != nil {
+		log.Panic(err)
+	}
+}
+
 func main (){
-	loadConfig();
+	templateCache = make(map[string]templateCacheObj)
+	pageCache = make(map[string]pageCacheObj)
+	loadConfig()
 	http.HandleFunc("/", markdownServer)
 	//Set feed handlers
 	for _, feed := range config.Feeds {
@@ -78,51 +142,87 @@ func main (){
 	http.ListenAndServe(":8080", nil)
 }
 
-//Begin type definitions
+// checkTemplateCacheExpiry: returns true if object is cached and not expired
+func (obj templateCacheObj) CheckTemplateExpiry () bool{
+	//Check expiry
+	if obj.Expiry > time.Now().Unix() {
+		return true
+	}
+	return false
+}
+
+// checkPageCacheExpiry: returns true if object is cached and not expired
+func (obj pageCacheObj) CheckPageExpiry () bool{
+	//Check expiry
+	if obj.Expiry > time.Now().Unix() {
+		return true
+	}
+	return false
+}
+
+//retriveTemplate: Get template from cache if valid, otherwise compiles template and add it to cache
+func retriveTemplate (templateName string) (*template.Template, error) {
+	if _, ok := templateCache[templateName]; ok {
+		if templateCache[templateName].CheckTemplateExpiry() {
+			return templateCache[templateName].Obj, nil
+		}
+	}
+	t, err := template.ParseFiles("templates/" + templateName)
+	if err != nil{
+		return t, err
+	}
+	go cacheTemplate(templateName, t)
+	return t, nil
+}
+
+//cacheTemplate: Adds template to cache
+func cacheTemplate(key string, obj *template.Template){
+	templateCache[key] = templateCacheObj{
+		Expiry: time.Now().Unix() + config.ContentExpiry,
+		Obj: obj,
+	}
+}
+
+//retrivePage: Cache Page objects, otherwise attempt to compile
+func retrivePage(path string) (Page, error){
+	if _, ok := pageCache[path]; ok {
+		if pageCache[path].CheckPageExpiry() {
+			return pageCache[path].Obj, nil
+		}
+	}
+	file, err := ioutil.ReadFile(config.WebRoot + "/" + path + ".md")
+	if err != nil {
+		return Page{}, err
+	}
+	content := blackfriday.MarkdownCommon(file)
+	//Read tags from extended attribute
+	tags, err := xattr.Getxattr(config.WebRoot + "/" + path + ".md", "tags")
+	if err != nil {
+		return Page{}, err
+	}
+	//Read title from extended attribute
+	title, err := xattr.Getxattr(config.WebRoot + "/" + path + ".md", "title")
+	if err != nil {
+		return Page{}, err
+	}
+	page := Page{Title: string(title), Content: template.HTML(fmt.Sprintf("%s", content)), Tags: string(tags)}
+	go cachePage(path, page)
+	return page, nil
+}
+
+//cachePage: Adds page to cache
+func cachePage(key string, obj Page){
+	pageCache[key] = pageCacheObj{
+		Expiry: time.Now().Unix() + config.ContentExpiry,
+		Obj: obj,
+	}
+}
+
 type Page struct {
 	Title string
 	Content template.HTML 
 	Tags string
 }
-
-
-//Configuration
-var config Config
-type Redirect struct {
-	Begin string
-	End string
-	Silent bool
-}
-
-type Author struct {
-	Name string
-	Email string
-}
-
-type Feed struct {
-	Title string
-	Root string
-	Path string
-	Excludes []string
-	Description string
-	Author Author
-}
-
-type Config struct {
-	WebRoot string
-	Domain string
-	Author Author
-	InternalRedirects []Redirect
-	ExternalRedirects []Redirect
-	Statics []struct {
-		PathInternal string
-		PathExternal string
-	}
-	Feeds []Feed
-}
-//End type definitions
-
-//Begin functions
 
 //Reverse proxy
 func reverseProxyHandler(rp *httputil.ReverseProxy) func (w http.ResponseWriter, r *http.Request) {
@@ -130,42 +230,23 @@ func reverseProxyHandler(rp *httputil.ReverseProxy) func (w http.ResponseWriter,
 			rp.ServeHTTP(w, r)
 		}
 }
-//Load configuration from file
-func loadConfig (){
-	File, err := ioutil.ReadFile("config.json")
-	if err != nil {
-		fmt.Println(err)
-		return 
-	}
-	json.Unmarshal(File, &config)
-}
+
 
 func markdownServer(w http.ResponseWriter, r *http.Request){
 	path := r.URL.Path[1:]
-	file, err := ioutil.ReadFile(config.WebRoot + "/" + path + ".md")
+	if path == ""{
+		path = "index"
+	}
+	t, err := retriveTemplate("main.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	content := blackfriday.MarkdownCommon(file)//TODO: Cache rendered templates.
-	t, err := template.ParseFiles("templates/main.html")
-	if err != nil{
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	//Read tags from extended attribute
-	tags, err := xattr.Getxattr(config.WebRoot + "/" + path + ".md", "tags")
+	page, err := retrivePage(path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	//Read title from extended attribute
-	title, err := xattr.Getxattr(config.WebRoot + "/" + path + ".md", "title")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	page := Page{Title: string(title), Content: template.HTML(fmt.Sprintf("%s", content)), Tags: string(tags)}
 	t.Execute(w,page)
 }
 
@@ -289,4 +370,3 @@ func exploreDirectory (path string, excludes []string) ([]string, error){
 	}
 	return output, nil
 }
-//End functions

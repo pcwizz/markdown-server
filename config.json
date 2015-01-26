@@ -39,5 +39,6 @@
 			"description": "Not a real feed; unless it is.",
 			"author": {}
 		}
-	]
+	],
+	"contentExpiry": 1800
 }
